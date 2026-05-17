@@ -14,6 +14,7 @@ import base64
 import random
 import asyncio
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Final, Tuple, Literal, Optional
 from datetime import datetime
 
@@ -548,9 +549,9 @@ class GeminiLiveHandler(ConversationHandler):
         except Exception as e:
             logger.debug("antenna twitch skipped: %s", e)
 
-    async def _handle_beeper_event(self, event: IncomingMessage) -> None:
-        """Antenna twitch + NOTIFY text prime to Gemini for one incoming message."""
-        if not self.session:
+    async def _handle_beeper_group(self, chat_id: str, events: List[IncomingMessage]) -> None:
+        """Antenna twitch + one coalesced [SYSTEM NOTIFY] for a chat's burst of messages."""
+        if not events or not self.session:
             return
 
         # Don't interrupt — wait until the user + model are both idle.
@@ -565,25 +566,54 @@ class GeminiLiveHandler(ConversationHandler):
         except Exception as e:
             logger.debug("Antenna twitch failed (non-fatal): %s", e)
 
-        sender = event.sender_name or "Someone"
-        platform = event.platform or "Beeper"
-        chat_id = event.chat_id or "unknown"
+        latest = events[-1]
+        count = len(events)
+        sender = latest.sender_name or "Someone"
+        platform = latest.platform or "Beeper"
+        chat_title = latest.chat_title or sender
+        preview_raw = (latest.text or "").strip().replace("\n", " ")
+        preview = (preview_raw[:120] + "...") if len(preview_raw) > 120 else preview_raw
+
+        if count == 1:
+            header = "[SYSTEM NOTIFY] New Beeper message"
+            count_line = ""
+            tell_user = (
+                "Tell the user only the sender and network "
+                "(e.g. \"You've got a message from Alice on WhatsApp\")."
+            )
+        else:
+            header = f"[SYSTEM NOTIFY] {count} new Beeper messages"
+            count_line = f"  count: {count}\n"
+            tell_user = (
+                f"Tell the user the count, sender, and network "
+                f"(e.g. \"You've got {count} new messages from Alice on WhatsApp\")."
+            )
 
         notify_text = (
-            f"[SYSTEM NOTIFY] New Beeper message from {sender} on {platform}, chat_id={chat_id}. "
-            "Tell the user only the sender's name and which network. Ask if they want you to read it. "
-            "Do NOT read the content unless they confirm."
+            f"{header}\n"
+            f"  chat_id: {chat_id}\n"
+            f"  sender: {sender}\n"
+            f"  network: {platform}\n"
+            f"  chat_title: {chat_title}\n"
+            f"{count_line}"
+            f"  latest preview: {preview}\n\n"
+            f"{tell_user} The preview is for YOUR context only — do NOT read it aloud. "
+            "Use chat_id directly with beeper_read_thread / beeper_send_message; "
+            "do NOT call beeper_find_chat. "
+            "If they say 'later' / 'not now' / 'skip', call beeper_defer_chat with this chat_id."
         )
 
         try:
             await self.session.send_realtime_input(text=notify_text)
             self.last_activity_time = asyncio.get_event_loop().time()
-            logger.info("Beeper notify sent: chat=%s sender=%s", chat_id, sender)
+            logger.info(
+                "Beeper notify sent: chat=%s sender=%s count=%d", chat_id, sender, count
+            )
         except Exception as e:
             logger.warning("Failed to send Beeper notify to Gemini: %s", e)
 
     async def _beeper_notify_loop(self) -> None:
-        """Drain the Beeper listener queue and prime the Gemini session."""
+        """Drain the Beeper listener queue, coalesce bursts, prime the Gemini session."""
         try:
             beeper_config = load_beeper_config()
         except Exception as e:
@@ -597,13 +627,50 @@ class GeminiLiveHandler(ConversationHandler):
         listener.start()
         logger.info("Beeper notify loop started")
 
+        # Adaptive coalesce: each new event extends the wait by IDLE_GAP_S; we
+        # only dispatch when there's been IDLE_GAP_S of silence (or HARD_CAP_S
+        # has elapsed since the first event). Tuned for human-paced bursts
+        # where Beeper's WS may space events several seconds apart.
+        IDLE_GAP_S = 3.0
+        HARD_CAP_S = 10.0
+
         try:
             while not self._stop_event.is_set():
                 try:
-                    event = await asyncio.wait_for(listener.queue.get(), timeout=1.0)
+                    first = await asyncio.wait_for(listener.queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
-                await self._handle_beeper_event(event)
+
+                grouped: Dict[str, List[IncomingMessage]] = defaultdict(list)
+                grouped[first.chat_id].append(first)
+
+                loop = asyncio.get_event_loop()
+                first_at = loop.time()
+                last_at = first_at
+                while not self._stop_event.is_set():
+                    now = loop.time()
+                    idle_remaining = (last_at + IDLE_GAP_S) - now
+                    cap_remaining = (first_at + HARD_CAP_S) - now
+                    remaining = min(idle_remaining, cap_remaining)
+                    if remaining <= 0:
+                        break
+                    try:
+                        nxt = await asyncio.wait_for(listener.queue.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    grouped[nxt.chat_id].append(nxt)
+                    last_at = loop.time()
+
+                # Dispatch per-chat, most-recently-active first.
+                ordered = sorted(
+                    grouped.items(),
+                    key=lambda kv: kv[1][-1].timestamp or "",
+                    reverse=True,
+                )
+                for cid, evs in ordered:
+                    if self._stop_event.is_set():
+                        break
+                    await self._handle_beeper_group(cid, evs)
         finally:
             await listener.stop()
             logger.info("Beeper notify loop stopped")

@@ -93,6 +93,26 @@ class BeeperListener:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._seen_ids = _LRUSet(max_size=2048)
+        # chat_id -> monotonic expiry timestamp. Events for deferred chats are
+        # dropped before they reach the queue.
+        self._deferred: dict[str, float] = {}
+
+    def defer(self, chat_id: str, ttl_seconds: float) -> None:
+        """Suppress notifications from `chat_id` for `ttl_seconds`."""
+        if not chat_id or ttl_seconds <= 0:
+            return
+        loop = asyncio.get_event_loop()
+        self._deferred[chat_id] = loop.time() + ttl_seconds
+        logger.info("Beeper deferral set: chat=%s for %.0fs", chat_id, ttl_seconds)
+
+    def is_deferred(self, chat_id: str) -> bool:
+        expiry = self._deferred.get(chat_id)
+        if expiry is None:
+            return False
+        if asyncio.get_event_loop().time() >= expiry:
+            self._deferred.pop(chat_id, None)
+            return False
+        return True
 
     def start(self) -> None:
         """Spawn the listener task. Safe to call repeatedly."""
@@ -184,6 +204,10 @@ class BeeperListener:
         chat_id = event.get("chatID") or ""
         entries = event.get("entries") or []
         if not chat_id or not entries:
+            return
+
+        if self.is_deferred(chat_id):
+            logger.debug("Beeper WS: chat %s is deferred; dropping %d entries", chat_id, len(entries))
             return
 
         for entry in entries:
