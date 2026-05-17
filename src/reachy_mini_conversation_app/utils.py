@@ -46,6 +46,12 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
         default=None,
         help="[Optional] Robot name to target. Must match the daemon's --robot-name when connecting to a specific robot, mainly useful for development with multiple robots.",
     )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="[Optional] Robot host (IP or DNS name) to connect to directly. Overrides the default mDNS-based discovery — useful on machines without Bonjour/mDNS (e.g. Windows without Bonjour Print Services).",
+    )
     return parser.parse_known_args()
 
 

@@ -110,8 +110,20 @@ def run(
             robot_kwargs = {}
             if args.robot_name is not None:
                 robot_kwargs["robot_name"] = args.robot_name
+            if getattr(args, "host", None) is not None:
+                robot_kwargs["host"] = args.host
+                # Force network mode when an explicit host is given. Otherwise
+                # the SDK's `auto` mode preferences any local IPC daemon it
+                # finds (e.g. Reachy Mini Control on the same Windows box),
+                # which would shadow the remote robot we're trying to target.
+                robot_kwargs["connection_mode"] = "network"
 
-            logger.info("Initializing ReachyMini (SDK will auto-detect appropriate backend)")
+            logger.info(
+                "Initializing ReachyMini (host=%s, robot_name=%s, mode=%s)",
+                robot_kwargs.get("host", "<auto>"),
+                robot_kwargs.get("robot_name", "<default>"),
+                robot_kwargs.get("connection_mode", "auto"),
+            )
             robot = ReachyMini(**robot_kwargs)
 
         except TimeoutError as e:

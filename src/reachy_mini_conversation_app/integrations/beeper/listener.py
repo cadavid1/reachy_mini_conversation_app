@@ -96,6 +96,10 @@ class BeeperListener:
         # chat_id -> monotonic expiry timestamp. Events for deferred chats are
         # dropped before they reach the queue.
         self._deferred: dict[str, float] = {}
+        # chat_id -> (chat_dict, cached_at_monotonic). Avoids a REST round-trip
+        # for every incoming event when checking is_muted / is_low_priority etc.
+        self._chat_info_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self._chat_cache_ttl = 60.0
 
     def defer(self, chat_id: str, ttl_seconds: float) -> None:
         """Suppress notifications from `chat_id` for `ttl_seconds`."""
@@ -260,6 +264,24 @@ class BeeperListener:
         if not text or not str(text).strip():
             return
 
+        # Respect Beeper's per-chat user preferences. Pinned chats override
+        # all filters — if the user pinned it, surface no matter what.
+        chat_info = await self._get_chat_info(chat_id)
+        if chat_info is not None and not chat_info.get("is_pinned"):
+            if (
+                chat_info.get("is_muted")
+                or chat_info.get("is_archived")
+                or chat_info.get("is_low_priority")
+            ):
+                logger.debug(
+                    "Skipping notify for chat %s (muted=%s, archived=%s, low_prio=%s)",
+                    chat_id,
+                    chat_info.get("is_muted"),
+                    chat_info.get("is_archived"),
+                    chat_info.get("is_low_priority"),
+                )
+                return
+
         incoming = IncomingMessage(
             chat_id=chat_id,
             chat_title=entry.get("chat_title"),
@@ -287,6 +309,20 @@ class BeeperListener:
             except RuntimeError:
                 return None
         return self._client
+
+    async def _get_chat_info(self, chat_id: str) -> dict[str, Any] | None:
+        """Return cached chat metadata (is_muted/is_low_priority/etc.) or fetch and cache it."""
+        now = asyncio.get_event_loop().time()
+        cached = self._chat_info_cache.get(chat_id)
+        if cached and now - cached[1] < self._chat_cache_ttl:
+            return cached[0]
+        client = self._ensure_client()
+        if client is None:
+            return None
+        info = await client.get_chat(chat_id)
+        if info is not None:
+            self._chat_info_cache[chat_id] = (info, now)
+        return info
 
 
 def get_listener() -> BeeperListener:

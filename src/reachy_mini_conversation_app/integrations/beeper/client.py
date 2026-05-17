@@ -70,6 +70,15 @@ class BeeperClient:
             return None
         return self._message_to_dict(msg)
 
+    async def get_chat(self, chat_id: str) -> dict[str, Any] | None:
+        """Retrieve a single chat's metadata (including is_muted/is_low_priority flags)."""
+        try:
+            chat = await self._sdk.chats.retrieve(chat_id)
+        except Exception as e:
+            logger.debug("get_chat(%s) failed: %s", chat_id, e)
+            return None
+        return self._chat_to_dict(chat)
+
     async def list_messages(self, chat_id: str, limit: int = 20) -> list[dict[str, Any]]:
         """Return up to `limit` messages from a chat, oldest-to-newest."""
         out: list[dict[str, Any]] = []
