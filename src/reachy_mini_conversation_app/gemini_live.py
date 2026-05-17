@@ -43,6 +43,8 @@ from reachy_mini_conversation_app.tools.background_tool_manager import (
     ToolNotification,
     BackgroundToolManager,
 )
+from reachy_mini_conversation_app.integrations.beeper import IncomingMessage, get_listener
+from reachy_mini_conversation_app.integrations.beeper.config import load_config as load_beeper_config
 
 
 logger = logging.getLogger(__name__)
@@ -513,6 +515,99 @@ class GeminiLiveHandler(ConversationHandler):
         except Exception as e:
             logger.warning("Error sending tool result to Gemini: %s", e)
 
+    def _is_busy(self) -> bool:
+        """Best-effort check that user or model is currently talking.
+
+        Used to gate proactive notifications (e.g. Beeper peek-then-ask) so we
+        don't interrupt the user or talk over the model's own response.
+        """
+        if self._listening_state:
+            return True
+        if self._pending_assistant_transcript_chunks:
+            return True
+        if asyncio.get_event_loop().time() - self.last_activity_time < 1.5:
+            return True
+        return False
+
+    async def _antenna_twitch(self) -> None:
+        """Quick antenna nod to physically signal an incoming Beeper message.
+
+        Best-effort: silently no-ops if the antenna API isn't available on the
+        connected Reachy SDK version.
+        """
+        robot = getattr(self.deps, "reachy_mini", None)
+        if robot is None:
+            return
+        try:
+            antennas = getattr(robot, "antennas", None) or getattr(robot, "antenna", None)
+            if antennas is None or not hasattr(antennas, "set_target"):
+                return
+            antennas.set_target({"left": 0.5, "right": -0.5})
+            await asyncio.sleep(0.25)
+            antennas.set_target({"left": 0.0, "right": 0.0})
+        except Exception as e:
+            logger.debug("antenna twitch skipped: %s", e)
+
+    async def _handle_beeper_event(self, event: IncomingMessage) -> None:
+        """Antenna twitch + NOTIFY text prime to Gemini for one incoming message."""
+        if not self.session:
+            return
+
+        # Don't interrupt — wait until the user + model are both idle.
+        while not self._stop_event.is_set() and self._is_busy():
+            await asyncio.sleep(0.5)
+
+        if self._stop_event.is_set() or not self.session:
+            return
+
+        try:
+            await self._antenna_twitch()
+        except Exception as e:
+            logger.debug("Antenna twitch failed (non-fatal): %s", e)
+
+        sender = event.sender_name or "Someone"
+        platform = event.platform or "Beeper"
+        chat_id = event.chat_id or "unknown"
+
+        notify_text = (
+            f"[SYSTEM NOTIFY] New Beeper message from {sender} on {platform}, chat_id={chat_id}. "
+            "Tell the user only the sender's name and which network. Ask if they want you to read it. "
+            "Do NOT read the content unless they confirm."
+        )
+
+        try:
+            await self.session.send_realtime_input(text=notify_text)
+            self.last_activity_time = asyncio.get_event_loop().time()
+            logger.info("Beeper notify sent: chat=%s sender=%s", chat_id, sender)
+        except Exception as e:
+            logger.warning("Failed to send Beeper notify to Gemini: %s", e)
+
+    async def _beeper_notify_loop(self) -> None:
+        """Drain the Beeper listener queue and prime the Gemini session."""
+        try:
+            beeper_config = load_beeper_config()
+        except Exception as e:
+            logger.warning("Beeper config load failed; notify loop disabled: %s", e)
+            return
+        if not beeper_config.is_configured:
+            logger.info("Beeper notify loop: BEEPER_ACCESS_TOKEN not set; skipping")
+            return
+
+        listener = get_listener()
+        listener.start()
+        logger.info("Beeper notify loop started")
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    event = await asyncio.wait_for(listener.queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                await self._handle_beeper_event(event)
+        finally:
+            await listener.stop()
+            logger.info("Beeper notify loop stopped")
+
     async def _video_sender_loop(self) -> None:
         """Send camera frames to Gemini Live at ~1 FPS for continuous visual context.
 
@@ -555,6 +650,7 @@ class GeminiLiveHandler(ConversationHandler):
             logger.info("Gemini Live session connected successfully")
 
             video_task: asyncio.Task[None] | None = None
+            beeper_task: asyncio.Task[None] | None = None
             try:
                 # Start the background tool manager
                 self.tool_manager.start_up(tool_callbacks=[self._handle_tool_result])
@@ -562,6 +658,9 @@ class GeminiLiveHandler(ConversationHandler):
                 # Start video sender if camera is available
                 if self.deps.camera_worker is not None:
                     video_task = asyncio.create_task(self._video_sender_loop(), name="gemini-video-sender")
+
+                # Start Beeper notify loop (no-op if BEEPER_ACCESS_TOKEN unset)
+                beeper_task = asyncio.create_task(self._beeper_notify_loop(), name="gemini-beeper-notify")
 
                 # session.receive() yields responses for the current turn then completes.
                 # We loop so the session stays alive across multiple conversation turns.
@@ -646,6 +745,12 @@ class GeminiLiveHandler(ConversationHandler):
                     video_task.cancel()
                     try:
                         await video_task
+                    except asyncio.CancelledError:
+                        pass
+                if beeper_task is not None:
+                    beeper_task.cancel()
+                    try:
+                        await beeper_task
                     except asyncio.CancelledError:
                         pass
                 await self.tool_manager.shutdown()

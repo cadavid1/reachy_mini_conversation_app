@@ -426,6 +426,23 @@ wheels = [
 ]
 
 [[package]]
+name = "beeper-desktop-api"
+version = "5.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ae/40/fab50bb899dc0d369dea9a6656a017d3242d3313bc211be435c898ba4443/beeper_desktop_api-5.0.0.tar.gz", hash = "sha256:50f8ed2c847425e3ff878fba8cae020d430ec0283145d48896546571d603e22f", size = 146091, upload-time = "2026-05-06T21:24:11.642Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/fb/8cbf3fc92a838fedc21d4e4ed70e499832512cb70610f0ddb92242964cc4/beeper_desktop_api-5.0.0-py3-none-any.whl", hash = "sha256:0cfb76ef35e1c0e8fa8972ab4bbf9fa1d0f57cb9998c70e78d5d5a884e7bccc8", size = 137960, upload-time = "2026-05-06T21:24:10.279Z" },
+]
+
+[[package]]
 name = "brotli"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4234,6 +4251,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiortc" },
     { name = "av" },
+    { name = "beeper-desktop-api" },
     { name = "fastrtc" },
     { name = "google-genai" },
     { name = "gradio" },
@@ -4245,6 +4263,7 @@ dependencies = [
     { name = "reachy-mini" },
     { name = "reachy-mini-dances-library" },
     { name = "reachy-mini-toolbox" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -4290,6 +4309,7 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'local-vision'", specifier = ">=1.13.0" },
     { name = "aiortc", specifier = ">=1.13.0" },
     { name = "av" },
+    { name = "beeper-desktop-api" },
     { name = "fastrtc", specifier = ">=0.0.34" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "gradio", specifier = "==5.50.1.dev1" },
@@ -4315,6 +4335,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'local-vision'", specifier = "==5.3.0" },
     { name = "ultralytics", marker = "extra == 'all-vision'" },
     { name = "ultralytics", marker = "extra == 'yolo-vision'" },
+    { name = "websockets", specifier = ">=12" },
 ]
 provides-extras = ["local-vision", "yolo-vision", "mediapipe-vision", "all-vision"]
 

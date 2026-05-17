@@ -32,6 +32,10 @@ dependencies = [
     "reachy_mini_toolbox",
     "reachy-mini>=1.7.1",
     "gradio_client>=1.13.3",
+
+    #Beeper integration
+    "beeper-desktop-api",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]
